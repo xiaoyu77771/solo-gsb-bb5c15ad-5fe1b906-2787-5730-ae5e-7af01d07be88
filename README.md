@@ -119,6 +119,76 @@ curl 'localhost:8000/leaderboard/page?limit=2&cursor=<next_cursor>'
 - 末页 `next_cursor` 为 `null`；空榜正常返回 `{"revision": 0, "entries": [], "next_cursor": null}`。
 - 游标格式为 `base64url(payload).base64url(HMAC-SHA256)`，payload 含版本号、revision、末条总分与 `participant_id`；篡改、格式错误、版本不支持或与显式 `revision` 冲突均返回 `422`，未知 revision 返回 `404`。
 
+### 名次变化 `GET /leaderboard/changes`
+
+比较两个 revision 快照之间的名次/总分变化。两个查询参数均**必填**：
+
+| 查询参数 | 说明 |
+|---|---|
+| `from_revision` | 起点 revision，允许传 `0` 表示空榜；须满足 `0 ≤ from_revision` |
+| `to_revision` | 终点 revision，须满足 `from_revision < to_revision ≤ 当前 revision` |
+
+- 顺序非法（缺参/非整数/负数、`from_revision ≥ to_revision`）返回 `422`；
+- 超出当前 revision 范围返回 `404`；
+- 响应仅包含**总分或名次发生变化**的参与者，按 `participant_id` 升序输出；
+- `before`/`after` 在对应快照中不存在时为 `null`，存在时含 `rank` 与 `total_points`；`points_delta = after.total_points - before.total_points`（缺席一侧按 0 计）；
+- 生效规则与排行榜一致：每个 revision 只计更正链当时的末端事件。若更正把某事件从参赛者 A 改挂到 B，同一响应中会同时出现 A 退出（`after: null`）与 B 进入（`before: null`）。
+
+```bash
+# 空榜（revision 0）到当前 revision 的全部变化
+curl 'localhost:8000/leaderboard/changes?from_revision=0&to_revision=4'
+```
+
+```json
+{
+  "from_revision": 0,
+  "to_revision": 4,
+  "changes": [
+    {
+      "participant_id": "alice",
+      "before": null,
+      "after": {"rank": 2, "total_points": 12},
+      "points_delta": 12
+    },
+    {
+      "participant_id": "bob",
+      "before": null,
+      "after": {"rank": 3, "total_points": 5},
+      "points_delta": 5
+    },
+    {
+      "participant_id": "carol",
+      "before": null,
+      "after": {"rank": 1, "total_points": 20},
+      "points_delta": 20
+    }
+  ]
+}
+```
+
+更正把事件从 `alice` 改挂到 `dave`（`from_revision=4&to_revision=5`）时：
+
+```json
+{
+  "from_revision": 4,
+  "to_revision": 5,
+  "changes": [
+    {
+      "participant_id": "alice",
+      "before": {"rank": 2, "total_points": 12},
+      "after": null,
+      "points_delta": -12
+    },
+    {
+      "participant_id": "dave",
+      "before": null,
+      "after": {"rank": 2, "total_points": 12},
+      "points_delta": 12
+    }
+  ]
+}
+```
+
 ### 其他端点
 
 | 方法 | 路径 | 说明 |
@@ -151,7 +221,7 @@ pip install -r requirements.txt -r requirements-dev.txt
 pytest -v
 ```
 
-测试覆盖：幂等重放、409 冲突、更正链末端计数、历史 revision 查询、排行榜排序、50 路并发写入下 revision 唯一且连续，以及 `/leaderboard/page` 游标分页（快照固定、并发续读、篡改/冲突返回 422、末页与空榜）。
+测试覆盖：幂等重放、409 冲突、更正链末端计数、历史 revision 查询、排行榜排序、50 路并发写入下 revision 唯一且连续，`/leaderboard/page` 游标分页（快照固定、并发续读、篡改/冲突返回 422、末页与空榜），以及 `/leaderboard/changes`（空榜对比、仅名次变化、更正链 A 退出/B 进入、参数顺序 422、超范围 404、按 `participant_id` 排序）。
 
 ## 设计要点
 

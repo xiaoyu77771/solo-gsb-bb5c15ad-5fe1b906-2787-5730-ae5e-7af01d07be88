@@ -16,9 +16,12 @@ from .schemas import (
     EffectiveEvent,
     EventIn,
     EventOut,
+    LeaderboardChangeOut,
+    LeaderboardChangesOut,
     LeaderboardEntry,
     LeaderboardOut,
     LeaderboardPageOut,
+    RankPosition,
 )
 
 
@@ -193,6 +196,75 @@ def leaderboard(revision: Optional[int] = None) -> LeaderboardOut:
         for i, (pid, total) in enumerate(ordered)
     ]
     return LeaderboardOut(revision=revision, entries=entries)
+
+
+def _snapshot(conn: sqlite3.Connection, revision: int) -> dict[str, RankPosition]:
+    """``{participant_id: (rank, total_points)}`` as of ``revision``.
+
+    ``revision == 0`` denotes the empty leaderboard. The effective-event
+    rule is the same one used by ``/leaderboard``: at revision R an event
+    counts iff it exists at R and no correction existing at R supersedes
+    it, so a correction that moves an event from participant A to B makes
+    A disappear and B appear in the same snapshot.
+    """
+    if revision == 0:
+        return {}
+    ordered, _details = _aggregate(_effective_rows(conn, revision))
+    return {
+        pid: RankPosition(rank=i + 1, total_points=total)
+        for i, (pid, total) in enumerate(ordered)
+    }
+
+
+def leaderboard_changes(
+    from_revision: int, to_revision: int
+) -> LeaderboardChangesOut:
+    """Participants whose total points or rank differ between two revisions.
+
+    Validation order: ordering errors (negative, ``from >= to``) are 422;
+    revisions beyond the current maximum are 404. ``from_revision == 0``
+    compares against the empty leaderboard.
+    """
+    if from_revision < 0 or from_revision >= to_revision:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "require 0 <= from_revision < to_revision, got "
+                f"from_revision={from_revision}, to_revision={to_revision}"
+            ),
+        )
+
+    with read_tx() as conn:
+        max_rev = conn.execute(
+            "SELECT COALESCE(MAX(revision), 0) FROM events"
+        ).fetchone()[0]
+        if to_revision > max_rev:
+            raise HTTPException(
+                status_code=404, detail=f"revision {to_revision} not found"
+            )
+        before_map = _snapshot(conn, from_revision)
+        after_map = _snapshot(conn, to_revision)
+
+    changes: list[LeaderboardChangeOut] = []
+    for pid in sorted(set(before_map) | set(after_map)):
+        before = before_map.get(pid)
+        after = after_map.get(pid)
+        before_total = before.total_points if before is not None else 0
+        after_total = after.total_points if after is not None else 0
+        if before != after:  # rank or total_points changed (covers entry/exit)
+            changes.append(
+                LeaderboardChangeOut(
+                    participant_id=pid,
+                    before=before,
+                    after=after,
+                    points_delta=after_total - before_total,
+                )
+            )
+    return LeaderboardChangesOut(
+        from_revision=from_revision,
+        to_revision=to_revision,
+        changes=changes,
+    )
 
 
 def leaderboard_page(
