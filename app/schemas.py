@@ -53,3 +53,27 @@ class LeaderboardPageOut(BaseModel):
         default=None,
         description="Signed cursor for the next page; null on the last page.",
     )
+
+
+class LeaderboardPosition(BaseModel):
+    """A participant's rank/total at one snapshot revision."""
+
+    rank: int
+    total_points: int
+
+
+class LeaderboardChange(BaseModel):
+    participant_id: str
+    before: Optional[LeaderboardPosition] = Field(
+        default=None, description="Null when the participant did not exist at from_revision."
+    )
+    after: Optional[LeaderboardPosition] = Field(
+        default=None, description="Null when the participant no longer exists at to_revision."
+    )
+    points_delta: int
+
+
+class LeaderboardChangesOut(BaseModel):
+    from_revision: int
+    to_revision: int
+    changes: List[LeaderboardChange]

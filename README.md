@@ -119,6 +119,53 @@ curl 'localhost:8000/leaderboard/page?limit=2&cursor=<next_cursor>'
 - 末页 `next_cursor` 为 `null`；空榜正常返回 `{"revision": 0, "entries": [], "next_cursor": null}`。
 - 游标格式为 `base64url(payload).base64url(HMAC-SHA256)`，payload 含版本号、revision、末条总分与 `participant_id`；篡改、格式错误、版本不支持或与显式 `revision` 冲突均返回 `422`，未知 revision 返回 `404`。
 
+### 名次变化 `GET /leaderboard/changes`
+
+比较两个 revision 快照之间的名次/总分变化，只返回**总分或名次发生变化**的参赛者（含新进入、退出榜）。
+
+| 查询参数 | 必填 | 说明 |
+|---|---|---|
+| `from_revision` | 是 | 起始快照 revision，允许传 `0` 表示空榜 |
+| `to_revision` | 是 | 结束快照 revision |
+
+约束 `0 ≤ from_revision < to_revision ≤ 当前 revision`：顺序非法（缺失、非整数、负数、相等或前后颠倒）返回 `422`；`to_revision` 超出当前 revision 返回 `404`。
+
+```bash
+# 空榜 -> revision 3
+curl 'localhost:8000/leaderboard/changes?from_revision=0&to_revision=3'
+
+# 两个历史快照之间
+curl 'localhost:8000/leaderboard/changes?from_revision=1&to_revision=3'
+```
+
+响应按 `participant_id` 升序；`before`/`after` 在对应快照中不存在时为 `null`，存在时含 `rank` 与 `total_points`：
+
+```json
+{
+  "from_revision": 1,
+  "to_revision": 3,
+  "changes": [
+    {
+      "participant_id": "alice",
+      "before": {"rank": 1, "total_points": 10},
+      "after": null,
+      "points_delta": -10
+    },
+    {
+      "participant_id": "bob",
+      "before": null,
+      "after": {"rank": 1, "total_points": 10},
+      "points_delta": 10
+    }
+  ]
+}
+```
+
+- `points_delta` = `after.total_points - before.total_points`（进入者按 before 0 分计，退出者按 after 0 分计）。
+- 名次因他人进出榜而变化、但总分不变的参与者也会出现，此时 `points_delta` 为 `0`。
+- 两个快照沿用与 `/leaderboard` 完全相同的更正链生效规则：每个 revision 只计当时的链末端事件。若更正把事件的参与者由 A 改为 B（如 `{"event_id":"e3","participant_id":"bob","points":10,"correction_of":"e1"}`，而 `e1` 属于 alice），A 的旧生效事件失效、B 新生效——A 退出（`after` 为 `null`）与 B 进入（`before` 为 `null`）会同时出现在结果中。
+- 无任何变化时返回 `"changes": []`。
+
 ### 其他端点
 
 | 方法 | 路径 | 说明 |
@@ -151,7 +198,7 @@ pip install -r requirements.txt -r requirements-dev.txt
 pytest -v
 ```
 
-测试覆盖：幂等重放、409 冲突、更正链末端计数、历史 revision 查询、排行榜排序、50 路并发写入下 revision 唯一且连续，以及 `/leaderboard/page` 游标分页（快照固定、并发续读、篡改/冲突返回 422、末页与空榜）。
+测试覆盖：幂等重放、409 冲突、更正链末端计数、历史 revision 查询、排行榜排序、50 路并发写入下 revision 唯一且连续，以及 `/leaderboard/page` 游标分页（快照固定、并发续读、篡改/冲突返回 422、末页与空榜），还有 `/leaderboard/changes` 名次对比（空榜起点、进入/退出、名次变动而总分不变、更正改参与者时 A 退出与 B 进入同时反映、非法顺序 422、越界 404、按 `participant_id` 升序）。
 
 ## 设计要点
 
@@ -160,3 +207,4 @@ pytest -v
 - **生效判定**：revision R 上事件 e 生效 ⟺ `e.revision ≤ R` 且不存在 `c.revision ≤ R` 的更正事件 `c.correction_of = e.event_id`。
 - **并发**：所有写操作在 `BEGIN IMMEDIATE` 事务内先取写锁、再计算 `MAX(revision)+1` 并插入，配合 `busy_timeout`，写者完全串行；读者走 WAL 快照，互不阻塞。
 - **游标分页**：`/leaderboard/page` 的游标经 HMAC-SHA256 签名（密钥来自 `LEADERBOARD_CURSOR_SECRET`），绑定 revision 与末条排序键 `(total_points, participant_id)`；续读始终落在游标指定的 revision 上，配合 WAL 快照读，写入并发进行也不会造成分页漂移。
+- **名次对比**：`/leaderboard/changes` 在同一读事务内分别按两个 revision 的生效事件聚合出 `{participant: (rank, total)}`（revision 0 视为空榜），取两边参与者并集按 `participant_id` 升序输出，只要任一侧缺失或 `(rank, total_points)` 不同即计入；`points_delta` 对缺失侧按 0 分计算。先校验 `0 ≤ from < to`（422），再校验 `to ≤ 当前 revision`（404）。

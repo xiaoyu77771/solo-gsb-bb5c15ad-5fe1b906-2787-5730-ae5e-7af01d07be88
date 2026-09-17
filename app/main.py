@@ -7,7 +7,13 @@ from fastapi import FastAPI, Query, Response, status
 
 from . import ledger
 from .db import init_db
-from .schemas import EventIn, EventOut, LeaderboardOut, LeaderboardPageOut
+from .schemas import (
+    EventIn,
+    EventOut,
+    LeaderboardChangesOut,
+    LeaderboardOut,
+    LeaderboardPageOut,
+)
 
 
 @asynccontextmanager
@@ -89,3 +95,22 @@ def get_leaderboard_page(
     ),
 ) -> LeaderboardPageOut:
     return ledger.leaderboard_page(revision, limit, cursor)
+
+
+@app.get(
+    "/leaderboard/changes",
+    response_model=LeaderboardChangesOut,
+    responses={
+        404: {"description": "to_revision is beyond the current revision"},
+        422: {"description": "Missing/non-integer params or invalid revision ordering"},
+    },
+)
+def get_leaderboard_changes(
+    from_revision: int = Query(
+        description="Earlier snapshot revision; 0 means the empty leaderboard.",
+    ),
+    to_revision: int = Query(
+        description="Later snapshot revision; must be <= the current revision.",
+    ),
+) -> LeaderboardChangesOut:
+    return ledger.leaderboard_changes(from_revision, to_revision)
